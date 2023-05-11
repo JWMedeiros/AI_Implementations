@@ -1,5 +1,6 @@
 # AI for Doom
-
+#This code requires some additional dependancies to work, found on the google Collab link.
+#Namely installing all the libraries related to the doom environment
 
 
 # Importing the libraries
@@ -12,8 +13,8 @@ from torch.autograd import Variable
 
 # Importing the packages for OpenAI and Doom
 import gym
-from gym.wrappers import SkipWrapper
-from ppaquette_gym_doom.wrappers.action_space import ToDiscrete
+import vizdoomgym
+from gym import wrappers
 
 # Importing the other Python files
 import experience_replay, image_preprocessing
@@ -34,7 +35,7 @@ class CNN(nn.Module):
         self.convolution2 = nn.Conv2d(in_channels = 32, out_channels = 32, kernel_size=3)
         self.convolution3 = nn.Conv2d(in_channels = 32, out_channels = 64, kernel_size=2)
         #The dimensions of the doom image are black and white, 80x80 images
-        self.fc1 = nn.Linear(in_features = self.count_neurons((1,80,80)), out_features = 40)
+        self.fc1 = nn.Linear(in_features = self.count_neurons((1,256,256)), out_features = 40)
         self.fc2 = nn.Linear(in_features = 40, out_features = number_actions)
     
     #Function to count the number of needed neurons from the incoming images dimensions
@@ -77,6 +78,113 @@ class SoftmaxBody(nn.Module):
         return actions
 
 # Making the AI
+class AI():
+    def __init__(self, brain, body):
+        self.brain = brain
+        self.body = body
+    
+    def __call__(self, inputs):
+        #Recieving the input images from the brain to enter the neural network
+        #Maxing a torch variable for later computing the SGD
+        input = Variable(torch.from_numpy(np.array(inputs, dtype = np.float32)))
+        #Then propogate images through the eyes of the AI using the brains forward function
+        output = self.brain(input)
+        #And lastly uses the body's forward function to turn the q values into actions
+        actions = self.body(output)
+        #Convert actions back and reformate them
+        return actions.data.numpy()
+        
 
 
 # Part 2 - Training the AI with Deep Convolutional Q-Learning
+
+# Getting the Doom environment
+#These lines are from the Open AI gym tutorials for getting the Doom space and number of actions
+doom_env = image_preprocessing.PreprocessImage(SkipWrapper(4)(ToDiscrete("minimal")(gym.make("ppaquette/DoomCorridor-v0"))), width=80, height=80, greyscale=True)
+doom_env = gym.wrappers.Monitor(doom_env, "videos", force = True)
+number_actions = doom_env.action_space.n
+
+#Building an AI
+#Create both the brain and the body then the ai from them
+cnn = CNN(number_actions)
+softmax_body = SoftmaxBody(T = 1.0)
+ai = AI(brain = cnn, body = softmax_body)
+
+#Setting up Experience Replay with number of steps and memory capacity
+n_steps = experience_replay.NStepProgress(env = doom_env, ai = ai, n_step = 10)
+memory = experience_replay.ReplayMemory(n_steps = n_steps, capacity = 10000)
+
+#Implementing Eligibility Trace
+def eligibility_trace(batch):
+    gamma = 0.99
+    inputs = []
+    targets = []
+    #Calculate cumulative reward over n steps
+    for series in batch:
+        #Input of first and last signal of batch
+        input = Variable(torch.from_numpy(np.array([series[0].state, series[-1].state], dtype = np.float32)))
+        output = cnn(input)
+        #Compute cumulative reward using N-Step q learning
+        #Cum reward is 0 if the last transition is done, otherwise its the max of the q values
+        cumul_reward = 0.0 if series[-1].done else output[1].data.max()
+        #From second last step to first step
+        for step in reversed(series[:-1]):
+            cumul_reward = step.reward + cumul_reward*gamma
+        #Prepare inputs and targets
+        state = series[0].state
+        target = output[0].data
+        target[series[0].action] = cumul_reward
+        #We only need 1 input and 1 state because we learn from the next 10 steps generated from that state
+        inputs.append(state)
+        targets.append(target)
+    return torch.from_numpy(np.array(inputs, dtype = np.float32)), torch.stack(targets)
+
+#Making the moving average on 100 steps
+class MA():
+    def __init__(self, size):
+        self.list_list_of_rewards = []
+        self.size = size
+        
+    #Add cumulative reward to list of rewards
+    def add(self, rewards):
+        #If the rewards are a list,
+        if isinstance(rewards, list):
+            self.list_list_of_rewards += rewards
+        else:
+            self.list_list_of_rewards.append(rewards)
+        #List of rewards never has more than size elements
+        while len(self.list_list_of_rewards) > self.size:
+            del self.list_list_of_rewards[0]
+    
+    #Compute the average of list of rewards
+    def average(self):
+        return np.mean(self.list_list_of_rewards)
+    
+ma = MA(100)
+
+#Training the AI
+#Making the loss function and then the optimizer afterwards
+loss = nn.MSELoss()
+optimizer = optim.Adam(cnn.parameters(), lr = 0.001)
+nb_epochs = 20
+#Starting the main training loop
+for epoch in range(1, nb_epochs+1):
+    #Each epoch is 200 runs of 10 steps
+    memory.run_steps(200)
+    #32 is common, but for our purposes its better to do more
+    for batch in memory.sample_batch(128):
+        inputs, targets = eligibility_trace(batch)
+        #Convert inputs and targets to torch variables
+        inputs, targets = Variable(inputs), Variable(targets)
+        predictions = cnn(inputs)
+        #Calculate loss error
+        loss_error = loss(predictions, targets)
+        optimizer.zero_grad()
+        #Backpropogate loss error
+        loss_error.backward()
+        #Update weights with SGD
+        optimizer.step()
+    rewards_steps = n_steps.rewards_steps()
+    ma.add(rewards_steps)
+    avg_reward = ma.average()
+    print("Epoch: %s, Average Reward: %s" % (str(epoch), str(avg_reward)))
