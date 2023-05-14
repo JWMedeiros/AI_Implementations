@@ -13,8 +13,8 @@ from torch.autograd import Variable
 
 # Importing the packages for OpenAI and Doom
 import gym
-import vizdoomgym
-from gym import wrappers
+from gym.wrappers import SkipWrapper
+from ppaquette_gym_doom.wrappers.action_space import ToDiscrete
 
 # Importing the other Python files
 import experience_replay, image_preprocessing
@@ -166,7 +166,7 @@ ma = MA(100)
 #Making the loss function and then the optimizer afterwards
 loss = nn.MSELoss()
 optimizer = optim.Adam(cnn.parameters(), lr = 0.001)
-nb_epochs = 20
+nb_epochs = 100
 #Starting the main training loop
 for epoch in range(1, nb_epochs+1):
     #Each epoch is 200 runs of 10 steps
